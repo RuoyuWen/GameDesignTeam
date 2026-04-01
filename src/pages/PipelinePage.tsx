@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentModuleId } from '../data/agentModules'
 import { chatCompletion, type ChatMessage } from '../lib/api'
 import { loadApiKey, loadModels } from '../lib/storage'
-import { extractAcceptanceCriteria, parseQaTotalScore } from '../pipeline/parse'
+import {
+  extractAcceptanceCriteria,
+  parseQaDecision,
+  parseQaRevisionFeedback,
+  parseQaTotalScore,
+} from '../pipeline/parse'
 import {
   pmFinalizePrd,
   runAllSubs,
@@ -14,6 +19,15 @@ import { PM_SYSTEM, PM_USER_FINALIZE_PRD } from '../../shared/prompts.ts'
 import './PipelinePage.css'
 
 const MAX_QA_ITERATIONS = 3
+const QA_PASS_SCORE = 70
+function isQaPassed(
+  score: number | null,
+  decision: 'pass' | 'reject' | null,
+): boolean {
+  // Product rule: score >= pass threshold always passes.
+  if (score !== null && score >= QA_PASS_SCORE) return true
+  return decision === 'pass'
+}
 
 export default function PipelinePage() {
   const [apiKey, setApiKey] = useState(() => loadApiKey())
@@ -37,6 +51,8 @@ export default function PipelinePage() {
   const [mergedGdd, setMergedGdd] = useState<string | null>(null)
   const [qaOut, setQaOut] = useState<string | null>(null)
   const [qaScore, setQaScore] = useState<number | null>(null)
+  const [qaDecision, setQaDecision] = useState<'pass' | 'reject' | null>(null)
+  const [qaApproved, setQaApproved] = useState(false)
   /** 在首次 QA 之后进行的修订轮数（总 QA 次数 ≤ MAX_QA_ITERATIONS）。 */
   const [qaRevisionCount, setQaRevisionCount] = useState(0)
 
@@ -127,6 +143,8 @@ export default function PipelinePage() {
       setMergedGdd(null)
       setQaOut(null)
       setQaScore(null)
+      setQaDecision(null)
+      setQaApproved(false)
       setQaRevisionCount(0)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -155,6 +173,8 @@ export default function PipelinePage() {
         setMergedGdd(null)
         setQaOut(null)
         setQaScore(null)
+        setQaDecision(null)
+        setQaApproved(false)
         setQaRevisionCount(0)
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e))
@@ -175,6 +195,8 @@ export default function PipelinePage() {
       setMergedGdd(null)
       setQaOut(null)
       setQaScore(null)
+      setQaDecision(null)
+      setQaApproved(false)
       setQaRevisionCount(0)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -199,6 +221,8 @@ export default function PipelinePage() {
       setMergedGdd(out)
       setQaOut(null)
       setQaScore(null)
+      setQaDecision(null)
+      setQaApproved(false)
       setQaRevisionCount(0)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -216,7 +240,10 @@ export default function PipelinePage() {
       const out = await runQa(apiKey, models.qa, acc, mergedGdd)
       setQaOut(out)
       const score = parseQaTotalScore(out)
+      const decision = parseQaDecision(out)
       setQaScore(score)
+      setQaDecision(decision)
+      setQaApproved(isQaPassed(score, decision))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -228,6 +255,7 @@ export default function PipelinePage() {
     if (!guard() || !models || !prd) return
     setBusy(true)
     setError(null)
+    setQaApproved(false)
     setQaRevisionCount(0)
     const completed: string[] = []
     setPipelineRun({
@@ -274,37 +302,31 @@ export default function PipelinePage() {
       let qaText = await runQa(apiKey, models.qa, acc, merged)
       setQaOut(qaText)
       let score = parseQaTotalScore(qaText)
+      let decision = parseQaDecision(qaText)
       setQaScore(score)
+      setQaDecision(decision)
       let qaRound = 1
       completed.push(`QA 验收（第 ${qaRound} 次）`)
 
-      if (score !== null && score >= 80) {
+      let passed = isQaPassed(score, decision)
+      if (passed) {
+        setQaApproved(true)
         setPipelineRun({
           completed: [...completed],
-          current: '全部完成（QA ≥ 80）',
-          status: 'done',
-        })
-      } else if (score === null) {
-        setPipelineRun({
-          completed: [...completed],
-          current:
-            '首次 QA 已完成，未能自动解析总分，请查看下方 QA 输出',
+          current: `全部完成（QA ≥ ${QA_PASS_SCORE}）`,
           status: 'done',
         })
       } else {
         setPipelineRun({
           completed: [...completed],
-          current: '未达 80 分，正在按 QA 意见进入修订…',
+          current: 'QA 未通过，正在按 QA 意见进入修订…',
           status: 'running',
         })
 
         let revisions = 0
-        while (
-          score !== null &&
-          score < 80 &&
-          revisions < MAX_QA_ITERATIONS - 1
-        ) {
+        while (!passed && revisions < MAX_QA_ITERATIONS - 1) {
           revisions += 1
+          const revisionFeedback = parseQaRevisionFeedback(qaText)
           setQaRevisionCount(revisions)
           setPipelineRun({
             completed: [...completed],
@@ -313,7 +335,7 @@ export default function PipelinePage() {
           })
           lead = await runLead(apiKey, models.lead, prd, {
             priorLead: lead,
-            feedback: qaText,
+            feedback: revisionFeedback?.lead?.trim() ? revisionFeedback.lead : qaText,
           })
           setLeadOut(lead)
           completed.push(`第 ${revisions} 轮 · 主策划`)
@@ -323,7 +345,10 @@ export default function PipelinePage() {
             status: 'running',
           })
 
-          subOut = await runAllSubs(apiKey, models, lead)
+          subOut = await runAllSubs(apiKey, models, lead, {
+            prior: subOut,
+            feedback: revisionFeedback ?? undefined,
+          })
           setSubs(subOut)
           completed.push(`第 ${revisions} 轮 · 子策划`)
           setPipelineRun({
@@ -352,23 +377,28 @@ export default function PipelinePage() {
           qaText = await runQa(apiKey, models.qa, acc, merged)
           setQaOut(qaText)
           score = parseQaTotalScore(qaText)
+          decision = parseQaDecision(qaText)
           setQaScore(score)
+          setQaDecision(decision)
           completed.push(`QA 验收（第 ${qaRound} 次）`)
+          passed = isQaPassed(score, decision)
 
-          if (score !== null && score >= 80) {
+          if (passed) {
+            setQaApproved(true)
             setPipelineRun({
               completed: [...completed],
-              current: '全部完成（QA ≥ 80）',
+              current: `全部完成（QA ≥ ${QA_PASS_SCORE}）`,
               status: 'done',
             })
             break
           }
         }
 
-        if (score !== null && score < 80) {
+        if (!passed) {
+          setQaApproved(false)
           setPipelineRun({
             completed: [...completed],
-            current: `流程结束：最近一次总分 ${score}，未达 80 可手动调整或再迭代`,
+            current: `流程暂停：QA 仍未通过（总分 ${score ?? '未解析'}），请继续迭代`,
             status: 'done',
           })
         }
@@ -388,8 +418,8 @@ export default function PipelinePage() {
   }, [apiKey, guard, models, prd])
 
   const qaNeedsRevision =
-    qaScore !== null &&
-    qaScore < 80 &&
+    !!qaOut &&
+    !qaApproved &&
     qaRevisionCount < MAX_QA_ITERATIONS - 1
 
   const manualRevision = useCallback(async () => {
@@ -399,6 +429,8 @@ export default function PipelinePage() {
     setError(null)
     const completed: string[] = []
     const nextCount = qaRevisionCount + 1
+    const revisionFeedback = parseQaRevisionFeedback(qaOut)
+    setQaApproved(false)
     setPipelineRun({
       completed: [],
       current: `手动第 ${nextCount} 轮 · 主策划修订…`,
@@ -408,7 +440,7 @@ export default function PipelinePage() {
       setQaRevisionCount(nextCount)
       const lead = await runLead(apiKey, models.lead, prd, {
         priorLead: leadOut,
-        feedback: qaOut,
+        feedback: revisionFeedback?.lead?.trim() ? revisionFeedback.lead : qaOut,
       })
       setLeadOut(lead)
       completed.push(`第 ${nextCount} 轮 · 主策划`)
@@ -417,7 +449,10 @@ export default function PipelinePage() {
         current: `手动第 ${nextCount} 轮 · 子策划并行…`,
         status: 'running',
       })
-      const subOut = await runAllSubs(apiKey, models, lead)
+      const subOut = await runAllSubs(apiKey, models, lead, {
+        prior: subs ?? undefined,
+        feedback: revisionFeedback ?? undefined,
+      })
       setSubs(subOut)
       completed.push(`第 ${nextCount} 轮 · 子策划`)
       setPipelineRun({
@@ -444,14 +479,18 @@ export default function PipelinePage() {
       const qaText = await runQa(apiKey, models.qa, acc, merged)
       setQaOut(qaText)
       const parsed = parseQaTotalScore(qaText)
+      const decision = parseQaDecision(qaText)
       setQaScore(parsed)
+      setQaDecision(decision)
       completed.push('QA 验收')
+      const passed = isQaPassed(parsed, decision)
+      setQaApproved(passed)
       setPipelineRun({
         completed: [...completed],
         current:
-          parsed !== null && parsed >= 80
-            ? '手动迭代完成（QA ≥ 80）'
-            : `手动迭代完成（总分 ${parsed ?? '未解析'}）`,
+          passed
+            ? `手动迭代完成（QA ≥ ${QA_PASS_SCORE}）`
+            : `手动迭代结束（QA 未通过，总分 ${parsed ?? '未解析'}）`,
         status: 'done',
       })
     } catch (e) {
@@ -472,8 +511,10 @@ export default function PipelinePage() {
     leadOut,
     models,
     prd,
+    qaApproved,
     qaRevisionCount,
     qaOut,
+    subs,
   ])
 
   const disabled = busy || !models
@@ -487,7 +528,7 @@ export default function PipelinePage() {
         <h1 className="pipeline-title">多智能体游戏设计管线</h1>
         <p className="pipeline-lead">
           与 PM 对话 → 生成 PRD → 主策划 / 子策划并行 → 合并 GDD → QA
-          打分（满分 100，≥80 及格）。请确认已运行{' '}
+          打分（满分 100，≥{QA_PASS_SCORE} 及格）。请确认已运行{' '}
           <code>npm run dev</code>（含本地 API 代理）。
         </p>
         <div className="pipeline-toolbar">
@@ -676,14 +717,20 @@ export default function PipelinePage() {
           </div>
         )}
 
-        {leadOut && (
+        {!qaApproved && (leadOut || subs || mergedGdd) && (
+          <p className="pipeline-hint">
+            当前为内部迭代稿，系统会继续按 QA 意见修订；仅当 QA 通过后才展示最终方案给你。
+          </p>
+        )}
+
+        {qaApproved && leadOut && (
           <>
             <h3 className="pipeline-h3">主策划输出</h3>
             <pre className="doc-block doc-block--sm">{leadOut}</pre>
           </>
         )}
 
-        {subs && (
+        {qaApproved && subs && (
           <>
             <h3 className="pipeline-h3">子策划（并行结果）</h3>
             <div className="sub-grid">
@@ -707,7 +754,7 @@ export default function PipelinePage() {
           </>
         )}
 
-        {mergedGdd && (
+        {qaApproved && mergedGdd && (
           <>
             <h3 className="pipeline-h3">合并 GDD</h3>
             <pre className="doc-block">{mergedGdd}</pre>
@@ -721,12 +768,14 @@ export default function PipelinePage() {
           {qaScore !== null && (
             <p className="qa-score">
               解析总分：<strong>{qaScore}</strong> / 100
-              {qaScore >= 80 ? '（及格）' : '（未及格）'}
+              {qaScore >= QA_PASS_SCORE ? '（及格）' : '（未及格）'}
               {qaRevisionCount > 0 && ` · 修订轮次 ${qaRevisionCount}`}
+              {(qaDecision || qaScore !== null) &&
+                ` · 判定：${qaApproved ? '通过' : '驳回修改'}`}
             </p>
           )}
           {qaOut && <pre className="doc-block">{qaOut}</pre>}
-          {qaScore !== null && qaScore < 80 && (
+          {qaOut && !qaApproved && (
             <button
               type="button"
               className="btn ghost"
