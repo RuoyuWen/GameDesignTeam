@@ -45,9 +45,10 @@ export async function runLead(
       {
         role: 'user',
         content:
-          '请输出任务分发清单与 GDD 骨架。若处于修订轮次，请显式说明相对上一版的变化。',
+          '请输出任务分发清单与 GDD 骨架。若处于修订轮次，请显式说明相对上一版的变化，并优先保留已被验证有效的设计，不得为“改而改”重写整套方案。',
       },
     ],
+    temperature: qaContext ? 0.25 : 0.45,
   })
 }
 
@@ -92,7 +93,8 @@ ${prior?.trim() || '（无可用上一版）'}
 ## ${roleLabel}模块 QA 修订意见（仅供本模块）
 ${feedback.trim()}
 
-请输出完整修订版，并在开头用 3-5 条要点列出“相对上一版改了什么”。`
+请输出完整修订版，并在开头用 3-5 条要点列出“相对上一版改了什么”。
+注意：对未被 QA 指出的部分，默认保持不变，避免无关改动造成回退。`
   }
 
   const [gameplay, systems, narrative, level] = await Promise.all([
@@ -110,6 +112,7 @@ ${feedback.trim()}
           ),
         },
       ],
+      temperature: revision?.feedback?.gameplay ? 0.25 : 0.45,
     }),
     chatCompletion({
       apiKey,
@@ -125,6 +128,7 @@ ${feedback.trim()}
           ),
         },
       ],
+      temperature: revision?.feedback?.systems ? 0.25 : 0.45,
     }),
     chatCompletion({
       apiKey,
@@ -140,6 +144,7 @@ ${feedback.trim()}
           ),
         },
       ],
+      temperature: revision?.feedback?.narrative ? 0.25 : 0.45,
     }),
     chatCompletion({
       apiKey,
@@ -151,6 +156,7 @@ ${feedback.trim()}
           content: subTask('关卡', revision?.prior?.level, revision?.feedback?.level),
         },
       ],
+      temperature: revision?.feedback?.level ? 0.25 : 0.45,
     }),
   ])
   return { gameplay, systems, narrative, level }
@@ -160,14 +166,23 @@ export async function runMerge(
   apiKey: string,
   model: string,
   payload: Parameters<typeof mergerUser>[0],
+  revision?: { priorMerged: string; feedback: string },
 ): Promise<string> {
+  const revisionHint =
+    revision && revision.feedback.trim()
+      ? `\n\n## 上一版合并稿（用于保留已达标内容）\n${revision.priorMerged}\n\n## QA 修订意见（仅针对问题点最小改动）\n${revision.feedback}`
+      : ''
   return chatCompletion({
     apiKey,
     model,
     messages: [
       { role: 'system', content: mergerSystem() },
-      { role: 'user', content: mergerUser(payload) },
+      {
+        role: 'user',
+        content: `${mergerUser(payload)}${revisionHint}`,
+      },
     ],
+    temperature: revision ? 0.2 : 0.35,
   })
 }
 
@@ -184,6 +199,6 @@ export async function runQa(
       { role: 'system', content: qaSystem(acceptanceBlock) },
       { role: 'user', content: QA_USER_WRAPPER + gdd },
     ],
-    temperature: 0.35,
+    temperature: 0.2,
   })
 }

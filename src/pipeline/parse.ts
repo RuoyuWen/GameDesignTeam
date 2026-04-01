@@ -1,4 +1,4 @@
-/** 从 QA 输出中解析总分（用于判定是否 ≥80）。 */
+/** 从 QA 输出中解析总分（用于判定是否达标）。 */
 export function parseQaTotalScore(text: string): number | null {
   const json = parseQaReviewJson(text)
   const scoreFromJson =

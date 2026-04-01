@@ -307,6 +307,13 @@ export default function PipelinePage() {
       setQaDecision(decision)
       let qaRound = 1
       completed.push(`QA 验收（第 ${qaRound} 次）`)
+      let best = {
+        score,
+        lead,
+        subOut,
+        merged,
+        qaText,
+      }
 
       let passed = isQaPassed(score, decision)
       if (passed) {
@@ -364,6 +371,9 @@ export default function PipelinePage() {
             systems: subOut.systems,
             narrative: subOut.narrative,
             level: subOut.level,
+          }, {
+            priorMerged: best.merged,
+            feedback: qaText,
           })
           setMergedGdd(merged)
           completed.push(`第 ${revisions} 轮 · 合并`)
@@ -381,6 +391,27 @@ export default function PipelinePage() {
           setQaScore(score)
           setQaDecision(decision)
           completed.push(`QA 验收（第 ${qaRound} 次）`)
+
+          if (score !== null && (best.score === null || score > best.score)) {
+            best = { score, lead, subOut, merged, qaText }
+          } else if (
+            score !== null &&
+            best.score !== null &&
+            score < best.score
+          ) {
+            // Regression guard: rollback to best-known draft to avoid iterative drift.
+            lead = best.lead
+            subOut = best.subOut
+            merged = best.merged
+            setLeadOut(lead)
+            setSubs(subOut)
+            setMergedGdd(merged)
+            setPipelineRun({
+              completed: [...completed],
+              current: `检测到分数回退（${score} < ${best.score}），已回滚到最佳版本继续修订…`,
+              status: 'running',
+            })
+          }
           passed = isQaPassed(score, decision)
 
           if (passed) {
@@ -467,6 +498,9 @@ export default function PipelinePage() {
         systems: subOut.systems,
         narrative: subOut.narrative,
         level: subOut.level,
+      }, {
+        priorMerged: mergedGdd ?? '',
+        feedback: qaOut,
       })
       setMergedGdd(merged)
       completed.push(`第 ${nextCount} 轮 · 合并`)
@@ -509,6 +543,7 @@ export default function PipelinePage() {
     apiKey,
     guard,
     leadOut,
+    mergedGdd,
     models,
     prd,
     qaApproved,

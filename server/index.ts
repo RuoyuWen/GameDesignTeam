@@ -41,7 +41,9 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-const PORT = Number(process.env.PORT) || 8787
+// Keep API port stable for Vite proxy (`/api` -> 8787).
+// Some environments inject `PORT`, which may conflict with frontend ports.
+const PORT = Number(process.env.API_PORT) || 8787
 app.listen(PORT, () => {
   console.log(`[gamedesign] API 监听 http://localhost:${PORT}`)
 })

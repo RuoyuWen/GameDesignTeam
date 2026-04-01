@@ -14,9 +14,23 @@ export async function chatCompletion(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   })
-  const data = (await r.json()) as { text?: string; error?: string }
+  const raw = await r.text()
+  let data: { text?: string; error?: string } | null = null
+  if (raw.trim()) {
+    try {
+      data = JSON.parse(raw) as { text?: string; error?: string }
+    } catch {
+      // Keep data as null and report a clearer error below.
+    }
+  }
+
   if (!r.ok) {
-    throw new Error(data.error || `请求失败 ${r.status}`)
+    throw new Error(data?.error || `请求失败 ${r.status}`)
+  }
+  if (!data) {
+    throw new Error(
+      '服务返回了非 JSON 响应，请确认本地 API 服务已启动且代理配置正常（npm run dev）。',
+    )
   }
   return data.text ?? ''
 }
